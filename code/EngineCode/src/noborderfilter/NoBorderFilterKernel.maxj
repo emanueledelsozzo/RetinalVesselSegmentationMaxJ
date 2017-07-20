@@ -1,0 +1,163 @@
+// Authors:
+// Emanuele Del Sozzo (emanuele.delsozzo@polimi.it), Marcello Pogliani (marcello.pogliani@polimi.it)
+
+// vim: syntax=java
+package noborderfilter;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.CounterChain;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.memory.Memory;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+import com.maxeler.maxcompiler.v2.utils.MathUtils;
+
+class NoBorderFilterKernel extends Kernel {
+
+
+    /*
+     * Declare the mapped ROM to store the kernel coefficients
+     * it is divided in multiple ROMs to facilitate concurrent access
+     */
+    private List<Memory<DFEVar>> buildCoefficientsROM(int kernelSize) {
+        /* To save space, 1 ROM for each columns (avoids the need to replicate multiple times the whole ROM) */
+        List<Memory<DFEVar>> columns = new ArrayList<Memory<DFEVar>>();
+        for(int i = 0; i < kernelSize; i++) {
+            Memory<DFEVar> cur = mem.alloc(dfeInt(32), kernelSize);
+            cur.mapToCPU("coefficients_" + i);
+            columns.add(cur);
+        }
+        return columns;
+    }
+
+
+    /*
+     * Simple kernel without loops and without using the LMem, just BRAM and in-mem offset
+     * Not really suggested for use beyond uint8_t single channel images
+     */
+/*    public void buildSimpleKernel(int transformationKernel[][], DFEType inputType, DFEType outputType, int maxWidth, int numberOfPipes) {
+        int kernelSize = transformationKernel.length;
+    	DFEType sizeType = dfeUInt(32);
+
+        DFEVar size_x = io.scalarInput("size_x", sizeType);
+        DFEVar size_y = io.scalarInput("size_y", sizeType);
+
+        // NumberOfPipes must be multiple of size_x
+        DFEVector<DFEVar> input = io.input("input", new DFEVectorType<DFEVar>(inputType, numberOfPipes));
+
+        CounterChain chain = control.count.makeCounterChain();
+        DFEVar ii = chain.addCounter(size_y, 1);
+        DFEVector<DFEVar> jj = chain.addCounterVect(numberOfPipes, size_x, 1);
+
+    	OffsetExpr sizey_offsetexpr = stream.makeOffsetParam("sizey_offsetexpr", 0, maxWidth);
+
+        final int start = kernelSize / 2;
+        DFEVector<DFEVar> sum = constant.vect(numberOfPipes, 0);
+        for(int k = - start; k < start; k++) {
+            for(int j = - start; j < start; j++) {
+            	DFEVector<DFEVar> cur = stream.offsetStriped(input, (- k) * sizey_offsetexpr - j);
+            	cur.simWatch("cur_"+(k+start)+"_"+(j+start));
+                sum = sum + cur.cast(new DFEVectorType<DFEVar>(outputType, numberOfPipes)) * transformationKernel[k + start][j + start];
+            }
+        }
+
+        DFEVector<DFEVar> cond = ii >= start & jj >= start & ii < size_y - start & jj < size_x - start;
+
+        io.output("output", cond ? sum : constant.vect(numberOfPipes, 0), new DFEVectorType<DFEVar>(outputType, numberOfPipes));
+    }
+*/
+    public void buildKernel(int kernelSize, int numberOfPipes, int numberOfLanes, DFEType inputType, DFEType outputType) {
+        /* Types */
+        DFEType sizeType = dfeUInt(32);
+
+        DFEVectorType<DFEVar> inputVecType  = new DFEVectorType<DFEVar>(inputType, numberOfPipes);
+        DFEVectorType<DFEVar> outputVecType = new DFEVectorType<DFEVar>(outputType, numberOfPipes);
+        DFEVectorType<DFEVar> sizeVecType   = new DFEVectorType<DFEVar>(sizeType, numberOfPipes);
+
+        List<Memory<DFEVar>> columns = buildCoefficientsROM(kernelSize);
+
+        /* Inputs */
+        List<DFEVector<DFEVar>> input_streams = new ArrayList<DFEVector<DFEVar>>();
+        for(int i = 0; i < numberOfLanes; i++) {
+            input_streams.add(io.input("input_" + i, inputVecType));
+        }
+        DFEVector<DFEVar> feedback_stream = io.input("feedback", outputVecType);
+
+        DFEVar size_x = io.scalarInput("size_x", sizeType);
+        DFEVar size_x_aligned = io.scalarInput("size_x_aligned", sizeType);
+        DFEVar size_y = io.scalarInput("size_y", sizeType);
+        /* which "pass" of the loop is this kernel invocation. Must span from 0 to "number of rows in the kernel - 1" */
+        DFEVar run = io.scalarInput("run", sizeType);
+        DFEVector<DFEVar> zero = constant.vect(numberOfPipes, 0);
+
+        /* The feedback stream is not relevant during the first run */
+        DFEVector<DFEVar> accumulator_stream = (run <= 0) ? zero : feedback_stream;
+
+        /* Declare a counter chain to iterate through the image */
+        CounterChain chain = control.count.makeCounterChain();
+        DFEVar ii = chain.addCounter(size_y, 1);
+        DFEVar jj = chain.addCounter(size_x_aligned, numberOfPipes);
+
+        final int start = kernelSize / 2;
+        DFEVector<DFEVar> sum = accumulator_stream; /* carried sum */
+        for (int k = -start; k < start; k++) {
+            for(int i = 0; i < input_streams.size(); i++) {
+                DFEVector<DFEVar> cur_input_stream = input_streams.get(i);
+                DFEVector<DFEVar> cur = stream.offsetStriped(cur_input_stream, -k);
+                /* Note that in the Synelixis implementation the order of elements in the window is somehow "inverted"... */
+                //sum = sum + cur.cast(outputVecType) * getKernelElement((kernel.length - (run + i) - 1).cast(dfeUInt(MathUtils.bitsToRepresent(kernel[0].length-1))), k + start, kernel, outputType);
+
+                // 1 global ROM
+                //DFEVar address = ((kernelSize - (run + i) - 1) * kernelSize + (k + start));
+                //DFEType addrBits = dfeUInt(MathUtils.bitsToRepresent(kernelSize * kernelSize - 1));
+				//sum = sum + cur.cast(outputVecType) * mems.get((k+start)/2).read(address.cast(addrBits)).cast(outputType);
+
+                // 1 ROM for each column
+                DFEVar address = kernelSize - run + i - 1;
+                DFEType addrBits = dfeUInt(MathUtils.bitsToRepresent(kernelSize - 1));
+                sum = sum + cur.cast(outputVecType) * columns.get(k + start).read(address.cast(addrBits)).cast(outputType);
+
+            }
+        }
+
+        DFEVector<DFEVar> rjj = sizeVecType.newInstance(this);
+        DFEVector<DFEVar> rii = sizeVecType.newInstance(this);
+        for(int i = 0; i < numberOfPipes; i++) {
+            DFEVar curj = jj + constant.var(i);
+            // Assumption (reasonable) ~> curj / size_x_aligned = 1
+            rjj[i] <== curj < size_x_aligned ? curj : size_x_aligned - curj;
+            rii[i] <== curj < size_x_aligned ? ii : ii + 1;
+        }
+
+        DFEVector<DFEVar> cond = rii >= start & rjj >= start & rii < size_y - start & rjj < size_x - start;
+        DFEVector<DFEVar> output = cond ? sum : constant.vect(numberOfPipes, 0);
+
+        io.output("output", output, outputVecType);
+    }
+
+	/*
+    private DFEVar getKernelElement(DFEVar chosen_i, int j, int[][] kernel, DFEType outputType) {
+        List<DFEVar> muxInputs = new ArrayList<DFEVar>();
+        for(int i = 0; i < kernel.length; i++) {
+            muxInputs.add(constant.var(kernel[i][j]).cast(outputType));
+        }
+        return control.mux(chosen_i, muxInputs);
+    }
+	*/
+
+/*    protected VesselKernel(KernelParameters parameters, int transformationKernel[][], DFEType inputType, DFEType outputType, int maxWidth, int numberOfPipes) {
+        super(parameters);
+        buildSimpleKernel(transformationKernel, inputType, outputType, maxWidth, numberOfPipes);
+    }
+*/
+    protected NoBorderFilterKernel(KernelParameters parameters, int kernelSize, int numberOfPipes, int numberOfLanes, DFEType inputType, DFEType outputType) {
+        super(parameters);
+        buildKernel(kernelSize, numberOfPipes, numberOfLanes, inputType, outputType);
+    }
+
+}

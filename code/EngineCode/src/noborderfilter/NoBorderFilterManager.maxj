@@ -1,0 +1,193 @@
+// Authors:
+// Emanuele Del Sozzo (emanuele.delsozzo@polimi.it), Marcello Pogliani (marcello.pogliani@polimi.it)
+
+// vim: syntax=java
+
+package noborderfilter;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import com.maxeler.maxcompiler.v2.build.EngineParameters;
+import com.maxeler.maxcompiler.v2.managers.BuildConfig;
+import com.maxeler.maxcompiler.v2.managers.BuildConfig.Effort;
+import com.maxeler.maxcompiler.v2.managers.custom.CustomManager;
+import com.maxeler.maxcompiler.v2.managers.custom.DFELink;
+import com.maxeler.maxcompiler.v2.managers.custom.blocks.KernelBlock;
+import com.maxeler.maxcompiler.v2.managers.custom.stdlib.LMemCommandGroup;
+import com.maxeler.maxcompiler.v2.managers.custom.stdlib.LMemInterface;
+import com.maxeler.maxcompiler.v2.managers.engine_interfaces.CPUTypes;
+import com.maxeler.maxcompiler.v2.managers.engine_interfaces.EngineInterface;
+import com.maxeler.maxcompiler.v2.managers.engine_interfaces.EngineInterface.Direction;
+import com.maxeler.maxcompiler.v2.managers.engine_interfaces.InterfaceParam;
+
+public class NoBorderFilterManager extends CustomManager {
+
+    private static final String s_kernelName = "NoBorderFilterKernel";
+
+    private final ImageDepth inputType;
+    private final ImageDepth outputType;
+    private final int numberOfPipes;
+    private final int numberOfLanes;
+	private final int kernelSize;
+
+
+    public NoBorderFilterManager(NoBorderFilterEngineParameters engineParameters) {
+        super(engineParameters);
+
+        this.config.setDefaultStreamClockFrequency(engineParameters.getStreamFrequency());
+        this.numberOfPipes = engineParameters.getNumberOfPipes();
+        this.numberOfLanes = engineParameters.getNumberOfLanes();
+        this.inputType     = engineParameters.getInputImageDepth();
+        this.outputType    = engineParameters.getOutputImageDepth();
+		this.kernelSize    = engineParameters.getKernelSize();
+
+        LMemInterface iface = addLMemInterface();
+
+        DFELink cpu2lmem = iface.addStreamToLMem("cpu2lmem", LMemCommandGroup.MemoryAccessPattern.LINEAR_1D);
+        DFELink lmem2cpu = iface.addStreamFromLMem("lmem2cpu", LMemCommandGroup.MemoryAccessPattern.LINEAR_1D);
+
+        DFELink fromcpu = addStreamFromCPU("fromcpu");
+        DFELink tocpu = addStreamToCPU("tocpu");
+
+        cpu2lmem <== fromcpu;
+        tocpu <== lmem2cpu;
+
+        KernelBlock block = addKernel(new NoBorderFilterKernel(
+                makeKernelParameters(s_kernelName),
+				kernelSize,
+                numberOfPipes,
+                numberOfLanes,
+                inputType.getDFEType(),
+                outputType.getDFEType()));
+
+        List<DFELink> inputs = new ArrayList<DFELink>();
+        for(int i = 0; i < numberOfLanes; i++) {
+        	inputs.add(iface.addStreamFromLMem("input_" + i, LMemCommandGroup.MemoryAccessPattern.LINEAR_1D));
+        }
+
+        DFELink feedback = iface.addStreamFromLMem("feedback", LMemCommandGroup.MemoryAccessPattern.LINEAR_1D);
+        DFELink output0 = iface.addStreamToLMem("output", LMemCommandGroup.MemoryAccessPattern.LINEAR_1D);
+
+        for(int i = 0; i < inputs.size(); i++)  {
+            block.getInput("input_" + i) <== inputs.get(i);
+        }
+        block.getInput("feedback") <== feedback;
+        output0 <== block.getOutput("output");
+    }
+
+
+    private EngineInterface interfaceSetCoefficients(String name) {
+        EngineInterface engineInterface = new EngineInterface(name);
+
+        engineInterface.ignoreTicks(s_kernelName);
+        engineInterface.ignoreScalar(s_kernelName, "run");
+        engineInterface.ignoreScalar(s_kernelName, "size_x");
+        engineInterface.ignoreScalar(s_kernelName, "size_x_aligned");
+        engineInterface.ignoreScalar(s_kernelName, "size_y");
+        engineInterface.ignoreStream("fromcpu");
+        engineInterface.ignoreStream("tocpu");
+        engineInterface.ignoreLMem("cpu2lmem");
+        engineInterface.ignoreLMem("feedback");
+        for(int i = 0; i < numberOfLanes; i++) {
+            engineInterface.ignoreLMem("input_" + i);
+        }
+        engineInterface.ignoreLMem("lmem2cpu");
+        engineInterface.ignoreLMem("output");
+
+        return engineInterface;
+    }
+
+
+    private EngineInterface interfaceWrite(String name) {
+        EngineInterface engineInterface = new EngineInterface(name);
+
+        InterfaceParam size = engineInterface.addParam("size", CPUTypes.UINT32);
+        InterfaceParam start = engineInterface.addParam("start", CPUTypes.UINT32);
+
+        engineInterface.setStream("fromcpu", inputType.getCPUType(), size * inputType.getCPUType().sizeInBytes());
+        engineInterface.setLMemLinear("cpu2lmem", start, size * inputType.getCPUType().sizeInBytes());
+        engineInterface.ignoreAll(Direction.IN_OUT);
+
+        return engineInterface;
+    }
+
+
+    private EngineInterface interfaceRead(String name) {
+        EngineInterface engineInterface = new EngineInterface(name);
+
+        InterfaceParam size = engineInterface.addParam("size", CPUTypes.UINT32);
+        InterfaceParam start = engineInterface.addParam("start", CPUTypes.UINT32);
+
+        engineInterface.setStream("tocpu", outputType.getCPUType(), size * outputType.getCPUType().sizeInBytes());
+        engineInterface.setLMemLinear("lmem2cpu", start, size * outputType.getCPUType().sizeInBytes());
+        engineInterface.ignoreAll(Direction.IN_OUT);
+
+        return engineInterface;
+    }
+
+
+    private EngineInterface interfaceOneKernel(String name) {
+        EngineInterface engine_interface = new EngineInterface(name);
+
+        InterfaceParam SizeX = engine_interface.addParam("size_x", CPUTypes.UINT32);
+        InterfaceParam SizeXAligned = engine_interface.addParam("size_x_aligned", CPUTypes.UINT32);
+        InterfaceParam SizeY = engine_interface.addParam("size_y", CPUTypes.UINT32);
+        InterfaceParam Run   = engine_interface.addParam("run", CPUTypes.UINT32);
+        InterfaceParam StartIn = engine_interface.addParam("start_in", CPUTypes.UINT32);
+        InterfaceParam StartOut = engine_interface.addParam("start_out", CPUTypes.UINT32);
+        InterfaceParam StartFeedback = engine_interface.addParam("start_feedback", CPUTypes.UINT32);
+
+        InterfaceParam inputSize = SizeXAligned * SizeY * inputType.getCPUType().sizeInBytes();
+        InterfaceParam outputSize = SizeXAligned * SizeY * outputType.getCPUType().sizeInBytes();
+
+        engine_interface.setTicks(s_kernelName, SizeXAligned * SizeY / numberOfPipes);
+        engine_interface.setScalar(s_kernelName, "size_x", SizeX);
+        engine_interface.setScalar(s_kernelName, "size_x_aligned", SizeXAligned);
+        engine_interface.setScalar(s_kernelName, "size_y", SizeY);
+        engine_interface.setScalar(s_kernelName, "run", Run);
+        for(int i = 0; i < numberOfLanes; i++)  {
+            engine_interface.setLMemLinear("input_" + i, StartIn + i * SizeXAligned * inputType.getCPUType().sizeInBytes(), inputSize);
+        }
+        engine_interface.setLMemLinear("feedback", StartFeedback, outputSize);
+        engine_interface.setLMemLinear("output", StartOut, outputSize);
+        engine_interface.ignoreAll(Direction.IN_OUT);
+
+        return engine_interface;
+    }
+
+
+	private void createSLiCInterfaces(NoBorderFilterEngineParameters param) {
+        this.createSLiCinterface(this.interfaceWrite("writeLMem"));
+        this.createSLiCinterface(this.interfaceRead("readLMem"));
+        this.createSLiCinterface(this.interfaceOneKernel("oneKernel"));
+        this.createSLiCinterface(this.interfaceSetCoefficients("setCoefficients"));
+        this.addMaxFileConstant("number_of_lanes", param.getNumberOfLanes());
+        this.addMaxFileConstant("kernel_size", param.getKernelSize());
+        this.addMaxFileConstant("input_type", param.getInputImageDepth().getIndex());
+        this.addMaxFileConstant("output_type", param.getOutputImageDepth().getIndex());
+	}
+
+
+    private void configBuild(EngineParameters params) {
+        BuildConfig buildConfig = getBuildConfig();
+        buildConfig.setBuildEffort(Effort.VERY_HIGH);
+        buildConfig.setEnableTimingAnalysis(true);
+        buildConfig.setMPPRCostTableSearchRange(params.getMPPRStartCT(), params.getMPPREndCT());
+        buildConfig.setMPPRParallelism(params.getMPPRThreads());
+        buildConfig.setMPPRRetryNearMissesThreshold(params.getMPPRRetryThreshold());
+    }
+
+
+    public static void main(String[] args) {
+        NoBorderFilterEngineParameters param = new NoBorderFilterEngineParameters(args);
+        NoBorderFilterManager manager = new NoBorderFilterManager(param);
+
+		manager.createSLiCInterfaces(param);
+
+        manager.configBuild(param);
+
+        manager.build();
+    }
+
+}

@@ -1,0 +1,96 @@
+// Authors:
+// Emanuele Del Sozzo (emanuele.delsozzo@polimi.it), Marcello Pogliani (marcello.pogliani@polimi.it)
+
+// vim: syntax=java
+package noborderfilter;
+
+import com.maxeler.maxcompiler.v2.build.EngineParameters;
+
+public class NoBorderFilterEngineParameters extends EngineParameters {
+
+    private static final String s_numberOfPipes    = "numberOfPipes";
+    private static final String s_numberOfLanes    = "numberOfLanes";
+    private static final String s_streamFrequency  = "streamFrequency";
+    private static final String s_inputImageDepth  = "inputImageDepth";
+    private static final String s_outputImageDepth = "outputImageDepth";
+    private static final String s_kernelSize       = "kernelSize";
+
+
+    public NoBorderFilterEngineParameters(String[] args) {
+        super(args);
+    }
+
+
+    @Override
+    protected void declarations() {
+        declareParam(s_numberOfPipes, DataType.INT, 12);
+        declareParam(s_numberOfLanes, DataType.INT, 2);
+        declareParam(s_streamFrequency, DataType.INT, 120);
+        declareParam(s_inputImageDepth, ImageDepth.class, ImageDepth.IPL_DEPTH_32S);
+        declareParam(s_outputImageDepth, ImageDepth.class, ImageDepth.IPL_DEPTH_32S);
+        declareParam(s_kernelSize, DataType.INT, 16);
+    }
+
+
+    @Override
+    protected void validate() {
+        if (getStreamFrequency() <= 0)
+            throw new IllegalArgumentException("Stream frequency should be > 0.");
+        if (getNumberOfPipes() < 1)
+            throw new IllegalArgumentException("There should be at least one pipe.");
+        if (getNumberOfLanes() < 1)
+            throw new IllegalArgumentException("Number of lanes should be > 0.");
+        if (getKernelSize() < 1 || getKernelSize() % 2 != 0)
+            throw new IllegalArgumentException("Kernel size must be > 0 and even");
+    }
+
+
+    public int getNumberOfPipes() {
+        return getParam(s_numberOfPipes);
+    }
+
+
+    public int getStreamFrequency() {
+        return getParam(s_streamFrequency);
+    }
+
+
+    public int getNumberOfLanes() {
+        return getParam(s_numberOfLanes);
+    }
+
+
+    public ImageDepth getInputImageDepth() {
+        return getParam(s_inputImageDepth);
+    }
+
+
+    public ImageDepth getOutputImageDepth() {
+        return getParam(s_outputImageDepth);
+    }
+
+    public int getKernelSize() {
+        return getParam(s_kernelSize);
+    }
+
+
+    @Override
+    public String getBuildName() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(getMaxFileName());
+        sb.append("_k");
+        sb.append(getKernelSize());
+        sb.append("_");
+        sb.append(getTarget());
+        sb.append("_p");
+        sb.append(getNumberOfPipes());
+        sb.append("_s");
+        sb.append(getNumberOfLanes());
+        sb.append("_in");
+        sb.append(getInputImageDepth());
+        sb.append("out");
+        sb.append(getOutputImageDepth());
+        return sb.toString();
+    }
+
+}

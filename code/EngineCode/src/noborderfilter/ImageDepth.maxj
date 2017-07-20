@@ -1,0 +1,51 @@
+// Authors:
+// Emanuele Del Sozzo (emanuele.delsozzo@polimi.it), Marcello Pogliani (marcello.pogliani@polimi.it)
+
+package noborderfilter;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.managers.engine_interfaces.CPUTypes;
+
+enum ImageDepth {
+
+    IPL_DEPTH_32S("32S", Kernel.dfeInt(32), CPUTypes.INT32, 0),
+    IPL_DEPTH_32F("32F", Kernel.dfeFloat(8, 24), CPUTypes.FLOAT, 1),
+    IPL_DEPTH_16U("16U", Kernel.dfeUInt(16), CPUTypes.UINT16, 2),
+    IPL_DEPTH_8U("8U", Kernel.dfeUInt(8), CPUTypes.UINT8, 3);
+
+    String str;
+    DFEType dfeType;
+    CPUTypes cpuType;
+    int index;
+
+
+    private ImageDepth(String str, DFEType dfeType, CPUTypes cpuType, int index) {
+        this.str = str;
+        this.dfeType = dfeType;
+        this.cpuType = cpuType;
+        this.index = index;
+    }
+
+
+    public DFEType getDFEType() {
+        return this.dfeType;
+    }
+
+
+    public CPUTypes getCPUType() {
+        return this.cpuType;
+    }
+
+
+    public int getIndex() {
+        return this.index;
+    }
+
+
+    @Override
+    public String toString() {
+        return this.str;
+    }
+
+};
